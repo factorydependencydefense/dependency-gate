@@ -1,0 +1,87 @@
+name: dependency-gate
+
+# Source of the reusable workflow published to factorydependencydefense/dependency-gate
+# (SPEC Decision 15). Sync it with `npx tsx tools/publish-gate.ts`; never edit the copy
+# in the gate repo by hand.
+
+on:
+  workflow_call:
+    inputs:
+      lockfile:
+        type: string
+        required: false
+        default: package-lock.json
+      max_age_hours:
+        type: string
+        required: false
+        default: '168'
+      allow_install_script:
+        type: string
+        required: false
+        default: esbuild
+
+permissions: {}
+
+jobs:
+  decide:
+    name: decide
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the gate, pinned to the commit the caller asked for
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: factorydependencydefense/dependency-gate
+          ref: ${{ github.job_workflow_sha }}
+          path: .gate
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24'
+
+      # The PR's lockfile is read through the API as data. No checkout of PR code,
+      # no install, no build, nothing from the PR is executed.
+      - name: Read the base and head lockfiles
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCKFILE: ${{ inputs.lockfile }}
+          BASE_REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          fetch() {
+            gh api "repos/$1/contents/$LOCKFILE?ref=$2" --jq '.content' 2>/dev/null | base64 -d > "$3" || return 1
+          }
+          if ! fetch "$HEAD_REPO" "$HEAD_SHA" head-lock.json; then
+            echo "The pull request has no $LOCKFILE, so there is no dependency change to judge." >> "$GITHUB_STEP_SUMMARY"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          fetch "$BASE_REPO" "$BASE_SHA" base-lock.json || echo '{"lockfileVersion":3,"packages":{}}' > base-lock.json
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+        id: lockfiles
+
+      - name: Judge the lockfile diff
+        if: steps.lockfiles.outputs.skip != 'true'
+        run: |
+          set -o pipefail
+          node .gate/gate.ts . \
+            --base-file base-lock.json \
+            --head-file head-lock.json \
+            --lockfile "${{ inputs.lockfile }}" \
+            --max-age-hours "${{ inputs.max_age_hours }}" \
+            --allow-install-script "${{ inputs.allow_install_script }}" \
+            --skip-signatures \
+            | tee gate-report.txt
+          status=$?
+          {
+            echo '## Dependency gate'
+            echo '```'
+            cat gate-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
