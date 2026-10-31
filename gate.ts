@@ -1,5 +1,5 @@
 // Generated file. Do not edit here.
-// Source: droid-dependency-defense tools/gate.ts at 3afb88890684f3e9b676a599626d61adbe640940
+// Source: droid-dependency-defense tools/gate.ts at 53df8fa0f1b1b90ea998ba21ca2b75429955e801
 // Sync with: npx tsx tools/publish-gate.ts <path-to-dependency-gate-clone>
 // There is one gate implementation (SPEC Decision 1). This copy exists only because
 // pull_request_target runs the workflow from the gate repo, which needs the code locally.
@@ -32,6 +32,7 @@ export interface Finding {
     | 'integrity_mismatch'
     | 'missing_integrity'
     | 'registry_unreachable'
+    | 'publish_dates_skipped'
     | 'audit_signatures'
     | 'signatures_unavailable';
   severity: Severity;
@@ -155,6 +156,7 @@ export interface JudgeOptions {
   repoPath?: string;
   publishTimes?: Map<string, string>;
   registryReachable?: boolean;
+  publishDatesSkipped?: boolean;
   lockfileName?: string;
   installScriptAllowlist?: string[];
   extraFindings?: Finding[];
@@ -282,12 +284,19 @@ export function judgeLockfiles(base: Lockfile | null, head: Lockfile, options: J
     }
   }
 
-  if (options.registryReachable === false) {
+  if (options.publishDatesSkipped) {
+    findings.push({
+      rule: 'publish_dates_skipped',
+      severity: 'info',
+      package: '-',
+      message: 'publish dates were not checked: --skip-publish-dates was set.',
+    });
+  } else if (options.registryReachable === false) {
     findings.push({
       rule: 'registry_unreachable',
       severity: 'info',
       package: '-',
-      message: 'registry unreachable: publish dates were not checked.',
+      message: 'publish dates were not checked: the registry could not be reached.',
     });
   }
 
@@ -327,7 +336,9 @@ export function renderGateReport(report: GateReport): string {
   if (report.counts.review > 0 && report.counts.block === 0) {
     lines.push('Review findings do not fail this check. A code owner decides (Decision 12).');
   }
-  if (!report.registry_reachable) lines.push('Registry unreachable: publish dates were not checked.');
+  if (!report.registry_reachable && !report.findings.some((f) => f.rule === 'publish_dates_skipped')) {
+    lines.push('Registry unreachable: publish dates were not checked.');
+  }
   for (const severity of order) {
     const matching = report.findings.filter((finding) => finding.severity === severity);
     if (matching.length === 0) continue;
@@ -486,6 +497,7 @@ export async function runGate(options: {
     installScriptAllowlist: options.installScriptAllowlist,
     publishTimes: times,
     registryReachable: reachable,
+    publishDatesSkipped: options.skipPublishDates === true,
     extraFindings,
   });
 }
